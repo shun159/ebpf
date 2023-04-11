@@ -38,6 +38,8 @@ func _() {
 	_ = x[RingBuf-27]
 	_ = x[InodeStorage-28]
 	_ = x[TaskStorage-29]
+	_ = x[BloomFilter-30]
+	_ = x[UserRingBuf-31]
 }
 
 const _MapType_name = "UnspecifiedMapHashArrayProgramArrayPerfEventArrayPerCPUHashPerCPUArrayStackTraceCGroupArrayLRUHashLRUCPUHashLPMTrieArrayOfMapsHashOfMapsDevMapSockMapCPUMapXSKMapSockHashCGroupStorageReusePortSockArrayPerCPUCGroupStorageQueueStackSkStorageDevMapHashStructOpsMapRingBufInodeStorageTaskStorage"
@@ -88,9 +90,9 @@ func _() {
 	_ = x[Syscall-31]
 }
 
-const _ProgramType_name = "UnspecifiedProgramSocketFilterKprobeSchedCLSSchedACTTracePointXDPPerfEventCGroupSKBCGroupSockLWTInLWTOutLWTXmitSockOpsSkSKBCGroupDeviceSkMsgRawTracepointCGroupSockAddrLWTSeg6LocalLircMode2SkReuseportFlowDissectorCGroupSysctlRawTracepointWritableCGroupSockoptTracingStructOpsExtensionLSMSkLookupSyscall"
+const _ProgramType_name = "UnspecifiedMapHashArrayProgramArrayPerfEventArrayPerCPUHashPerCPUArrayStackTraceCGroupArrayLRUHashLRUCPUHashLPMTrieArrayOfMapsHashOfMapsDevMapSockMapCPUMapXSKMapSockHashCGroupStorageReusePortSockArrayPerCPUCGroupStorageQueueStackSkStorageDevMapHashStructOpsMapRingBufInodeStorageTaskStorageBloomFilterUserRingBuf"
 
-var _ProgramType_index = [...]uint16{0, 18, 30, 36, 44, 52, 62, 65, 74, 83, 93, 98, 104, 111, 118, 123, 135, 140, 153, 167, 179, 188, 199, 212, 224, 245, 258, 265, 274, 283, 286, 294, 301}
+var _ProgramType_index = [...]uint16{0, 18, 30, 36, 44, 52, 62, 65, 74, 83, 93, 98, 104, 111, 118, 123, 135, 140, 153, 167, 179, 188, 199, 212, 224, 245, 258, 265, 274, 283, 286, 294, 301, 312}
 
 func (i ProgramType) String() string {
 	if i >= ProgramType(len(_ProgramType_index)-1) {

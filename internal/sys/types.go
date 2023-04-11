@@ -371,6 +371,7 @@ const (
 	BPF_MAP_TYPE_INODE_STORAGE         MapType = 28
 	BPF_MAP_TYPE_TASK_STORAGE          MapType = 29
 	BPF_MAP_TYPE_BLOOM_FILTER          MapType = 30
+	BPF_MAP_TYPE_USER_RINGBUF          MapType = 31
 )
 
 type ProgType uint32
