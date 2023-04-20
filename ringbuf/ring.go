@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/internal/unix"
 )
 
@@ -15,6 +16,11 @@ type ringbufEventRing struct {
 	prod []byte
 	cons []byte
 	*ringReader
+}
+
+func mapIsRingbuf(ringbufMap *ebpf.Map) bool {
+	return (ringbufMap.Type() == ebpf.RingBuf) ||
+		(ringbufMap.Type() == ebpf.UserRingBuf)
 }
 
 func newRingBufEventRing(mapFD, size int) (*ringbufEventRing, error) {
@@ -70,7 +76,6 @@ func newRingReader(cons_ptr, prod_ptr *uint64, ring []byte) *ringReader {
 		ring: ring,
 	}
 }
-
 func (rr *ringReader) loadConsumer() {
 	rr.cons = atomic.LoadUint64(rr.cons_pos)
 }
@@ -106,4 +111,73 @@ func (rr *ringReader) Read(p []byte) (int, error) {
 	}
 
 	return int(n), nil
+}
+
+// UserRingBuf API
+
+func newUserRingBufEventRing(mapFD, size int) (*userRingbufEventRing, error) {
+	cons, err := unix.Mmap(mapFD, 0, os.Getpagesize(), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("can't mmap consumer page: %w", err)
+	}
+
+	prod, err := unix.Mmap(mapFD, (int64)(os.Getpagesize()), os.Getpagesize()+2*size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		_ = unix.Munmap(cons)
+		return nil, fmt.Errorf("can't mmap data pages: %w", err)
+	}
+
+	cons_pos := (*uint64)(unsafe.Pointer(&cons[0]))
+	prod_pos := (*uint64)(unsafe.Pointer(&prod[0]))
+
+	ring := &userRingbufEventRing{
+		prod:       prod,
+		cons:       cons,
+		ringWriter: newRingWriter(cons_pos, prod_pos, prod[os.Getpagesize():]),
+	}
+	runtime.SetFinalizer(ring, (*userRingbufEventRing).Close)
+
+	return ring, nil
+}
+
+type userRingbufEventRing struct {
+	prod []byte
+	cons []byte
+	*ringWriter
+}
+
+type ringWriter struct {
+	// These point into mmap'ed memory and must be accessed atomically.
+	prod_pos, cons_pos *uint64
+	prod               uint64
+	mask               uint64
+	ring               []byte
+}
+
+func newRingWriter(cons_ptr, prod_ptr *uint64, ring []byte) *ringWriter {
+	return &ringWriter{
+		prod_pos: prod_ptr,
+		cons_pos: cons_ptr,
+		prod:     atomic.LoadUint64(prod_ptr),
+		mask:     uint64(cap(ring)/2 - 1),
+		ring:     ring,
+	}
+}
+
+func (rw *ringWriter) loadProducer() {
+	rw.prod = atomic.LoadUint64(rw.prod_pos)
+}
+
+func (rw *ringWriter) storeProducer() {
+	atomic.StoreUint64(rw.prod_pos, rw.prod)
+}
+
+func (ring *userRingbufEventRing) Close() {
+	runtime.SetFinalizer(ring, nil)
+
+	_ = unix.Munmap(ring.prod)
+	_ = unix.Munmap(ring.cons)
+
+	ring.prod = nil
+	ring.cons = nil
 }

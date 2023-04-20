@@ -48,7 +48,7 @@ This library includes the following packages:
 * [perf](https://pkg.go.dev/github.com/cilium/ebpf/perf) allows reading from a
   `PERF_EVENT_ARRAY`
 * [ringbuf](https://pkg.go.dev/github.com/cilium/ebpf/ringbuf) allows reading from a
-  `BPF_MAP_TYPE_RINGBUF` map
+  `BPF_MAP_TYPE_RINGBUF` map, and writing to a `BPF_MAP_TYPE_USER_RINGBUF` map.
 * [features](https://pkg.go.dev/github.com/cilium/ebpf/features) implements the equivalent
   of `bpftool feature probe` for discovering BPF-related kernel features using native Go.
 * [rlimit](https://pkg.go.dev/github.com/cilium/ebpf/rlimit) provides a convenient API to lift

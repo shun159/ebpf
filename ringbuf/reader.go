@@ -117,7 +117,7 @@ type Reader struct {
 
 // NewReader creates a new BPF ringbuf reader.
 func NewReader(ringbufMap *ebpf.Map) (*Reader, error) {
-	if ringbufMap.Type() != ebpf.RingBuf {
+	if !mapIsRingbuf(ringbufMap) {
 		return nil, fmt.Errorf("invalid Map type: %s", ringbufMap.Type())
 	}
 
@@ -131,7 +131,7 @@ func NewReader(ringbufMap *ebpf.Map) (*Reader, error) {
 		return nil, err
 	}
 
-	if err := poller.Add(ringbufMap.FD(), 0); err != nil {
+	if err := poller.Add(ringbufMap.FD(), 0, unix.EPOLLIN); err != nil {
 		poller.Close()
 		return nil, err
 	}

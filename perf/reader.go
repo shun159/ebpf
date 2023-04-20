@@ -231,7 +231,7 @@ func NewReaderWithOptions(array *ebpf.Map, perCPUBuffer int, opts ReaderOptions)
 		rings = append(rings, ring)
 		pauseFds = append(pauseFds, ring.fd)
 
-		if err := poller.Add(ring.fd, i); err != nil {
+		if err := poller.Add(ring.fd, i, unix.EPOLLIN); err != nil {
 			return nil, err
 		}
 	}

@@ -290,7 +290,7 @@ func clangBin(t *testing.T) string {
 
 	// Use a recent clang version for local development, but allow CI to run
 	// against oldest supported clang.
-	clang := "clang-14"
+	clang := "clang"
 	if minVersion := os.Getenv("CI_MIN_CLANG_VERSION"); minVersion != "" {
 		clang = fmt.Sprintf("clang-%s", minVersion)
 	}

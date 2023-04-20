@@ -38,7 +38,7 @@ func New() (*Poller, error) {
 		return nil, err
 	}
 
-	if err := p.Add(p.event.raw, 0); err != nil {
+	if err := p.Add(p.event.raw, 0, unix.EPOLLIN); err != nil {
 		unix.Close(epollFd)
 		p.event.close()
 		return nil, fmt.Errorf("add eventfd: %w", err)
@@ -87,7 +87,7 @@ func (p *Poller) Close() error {
 // must not exceed math.MaxInt32.
 //
 // Add is blocked by Wait.
-func (p *Poller) Add(fd int, id int) error {
+func (p *Poller) Add(fd int, id int, events uint32) error {
 	if int64(id) > math.MaxInt32 {
 		return fmt.Errorf("unsupported id: %d", id)
 	}
@@ -104,7 +104,7 @@ func (p *Poller) Add(fd int, id int) error {
 	// id in there, which allows us to identify the event later (e.g.,
 	// in case of perf events, which CPU sent it).
 	event := unix.EpollEvent{
-		Events: unix.EPOLLIN,
+		Events: events,
 		Fd:     int32(fd),
 		Pad:    int32(id),
 	}

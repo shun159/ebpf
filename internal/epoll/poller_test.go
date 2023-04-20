@@ -122,7 +122,7 @@ func mustNewPoller(t *testing.T) (*eventFd, *Poller) {
 	}
 	t.Cleanup(func() { poller.Close() })
 
-	if err := poller.Add(event.raw, 42); err != nil {
+	if err := poller.Add(event.raw, 42, unix.EPOLLIN); err != nil {
 		t.Fatal("Can't add fd:", err)
 	}
 
