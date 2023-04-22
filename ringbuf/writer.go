@@ -6,14 +6,13 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/internal/epoll"
 	"github.com/cilium/ebpf/internal/unix"
 )
-
-const userRingbufHeaderSize = 8
 
 type userRingbufHeader struct {
 	Len uint32
@@ -33,15 +32,16 @@ func (rh *userRingbufHeader) dataLen() int {
 }
 
 type Writer struct {
-	poller  *epoll.Poller
-	mu      sync.Mutex
-	prod    []byte
-	cons    []byte
-	prodPos *uint64
-	consPos *uint64
-	data    unsafe.Pointer
-	mask    uint64
-	mapFd   int
+	poller      *epoll.Poller
+	mu          sync.Mutex
+	epollEvents []unix.EpollEvent
+	prod        []byte
+	cons        []byte
+	prodPos     *uint64
+	consPos     *uint64
+	data        *byte
+	mask        uint64
+	mapFd       int
 }
 
 func NewWriter(userRingbufMap *ebpf.Map) (*Writer, error) {
@@ -84,21 +84,22 @@ func NewWriter(userRingbufMap *ebpf.Map) (*Writer, error) {
 		return nil, fmt.Errorf("can't mmap data pages: %w", err)
 	}
 
-	data := unsafe.Add(unsafe.Pointer(&prod[0]), pageSize)
+	data := (*byte)(unsafe.Add(unsafe.Pointer(&prod[0]), pageSize))
 	mask := uint64(maxEntries) - 1
 	consPos := (*uint64)(unsafe.Pointer(&cons[0]))
 	prodPos := (*uint64)(unsafe.Pointer(&prod[0]))
 
 	return &Writer{
-		poller:  poller,
-		mu:      sync.Mutex{},
-		prod:    prod,
-		cons:    cons,
-		consPos: consPos,
-		prodPos: prodPos,
-		data:    data,
-		mask:    mask,
-		mapFd:   mapFd,
+		poller:      poller,
+		mu:          sync.Mutex{},
+		epollEvents: make([]unix.EpollEvent, 1),
+		prod:        prod,
+		cons:        cons,
+		consPos:     consPos,
+		prodPos:     prodPos,
+		data:        data,
+		mask:        mask,
+		mapFd:       mapFd,
 	}, nil
 }
 
@@ -126,32 +127,40 @@ func (w *Writer) Close() error {
 	return nil
 }
 
-func (w *Writer) Commit(sample []byte, discard bool) error {
-	hdrOff := (uintptr(w.data)) + 100 - uintptr(w.data) - userRingbufHeaderSize
-	fmt.Println(hdrOff)
-	hdr := (*(*userRingbufHeader)(unsafe.Pointer(uintptr(unsafe.Pointer(&w.prod[0]))))) //+ (hdrOff & uintptr(w.mask)))))
-	newLen := hdr.Len & ^uint32(unix.BPF_RINGBUF_BUSY_BIT)
-	if discard {
-		newLen |= unix.BPF_RINGBUF_DISCARD_BIT
-	}
-	atomic.SwapUint32(&hdr.Len, newLen)
+func (w *Writer) Commit(sample []byte, discard bool) {
+	ofs :=
+		uintptr(w.mask) + 1 +
+			uintptr(unsafe.Pointer(&sample[0])) -
+			uintptr(unsafe.Pointer(w.data)) -
+			unix.BPF_RINGBUF_HDR_SZ
+	hdr := (*userRingbufHeader)(
+		unsafe.Pointer(
+			uintptr(unsafe.Pointer(w.data)) +
+				(ofs & uintptr(w.mask))))
 
-	fmt.Println(hdr)
-	return nil
+	new_len := hdr.Len & ^uint32(unix.BPF_RINGBUF_BUSY_BIT)
+	if discard {
+		new_len |= unix.BPF_RINGBUF_DISCARD_BIT
+	}
+
+	// Synchronizes with smp_load_acquire() in __bpf_user_ringbuf_peek() in the kernel
+	atomic.SwapUint32(&hdr.Len, new_len)
 }
 
 func (w *Writer) Reserve(size uint32) ([]byte, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Synchronizes with smp_store_release() in __bpf_user_ringbuf_peek() in kernel
 	cons_pos := atomic.LoadUint64(w.consPos)
+	// Synchronizes with smp_store_release() in user_ringbuf_commit()
 	prod_pos := atomic.LoadUint64(w.prodPos)
 
 	max_size := w.mask + 1
 	avail_size := max_size - (prod_pos - cons_pos)
 
 	// Round up total size to a multiple of 8.
-	total_size := uint64((size + userRingbufHeaderSize + 7) / 8 * 8)
+	total_size := uint64((size + unix.BPF_RINGBUF_HDR_SZ + 7) / 8 * 8)
 
 	if total_size > max_size {
 		return nil, unix.E2BIG
@@ -161,18 +170,63 @@ func (w *Writer) Reserve(size uint32) ([]byte, error) {
 		return nil, unix.ENOSPC
 	}
 
-	hdr := (*userRingbufHeader)(unsafe.Slice((*byte)(w.data), userRingbufHeaderSize)[0])
+	p := unsafe.Pointer(uintptr(unsafe.Pointer(w.data)) + uintptr(prod_pos))
+	hdr := (*userRingbufHeader)(p)
 	hdr.Len = size | unix.BPF_RINGBUF_BUSY_BIT
-	atomic.StoreUint64(w.prodPos, (prod_pos + total_size))
+	hdr.Pad = 0
 
-	fmt.Println(w.prod[:10])
-	//offset := (prod_pos + userRingbufHeaderSize) & w.mask
-	w.data = unsafe.Add(w.data, userRingbufHeaderSize)
-	sample := unsafe.Slice(w.data, size)
+	// synchronizes with smp_load_acquire in __bpf_user_ringbuf_peek in the kernel
+	atomic.StoreUint64(w.prodPos, prod_pos+total_size)
+
+	ofs := uintptr((prod_pos + unix.BPF_RINGBUF_HDR_SZ) & w.mask)
+	ptr := (*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(w.data)) + ofs))
+	sample := unsafe.Slice(ptr, size)
 
 	return sample, nil
 }
 
-func (w *Writer) ReserveBlocking() {}
-func (w *Writer) Discard()         {}
-func (w *Writer) Free()            {}
+func (w *Writer) Submit(sample []byte) {
+	w.Commit(sample, false)
+}
+func (w *Writer) Discard(sample []byte) {
+	w.Commit(sample, true)
+}
+
+func (w *Writer) ReserveBlocking(size uint32, timeout int) ([]byte, error) {
+	var sample []byte
+	var start time.Time
+
+	ms_remaining := int64(timeout)
+
+	if timeout < 0 && timeout != -1 {
+		return sample, unix.EINVAL
+	} else if timeout != -1 {
+		start = time.Now()
+	}
+
+	for ms_remaining > 0 {
+		sample, err := w.Reserve(size)
+		if err == nil {
+			return sample, nil
+		} else if err != nil && !errors.Is(err, unix.ENOSPC) {
+			return []byte{}, err
+		}
+
+		ms_epoll_wait := time.Now().Add(time.Millisecond * time.Duration(ms_remaining))
+		if _, err = w.poller.Wait(w.epollEvents[:1], ms_epoll_wait); err != nil {
+			return []byte{}, err
+		}
+
+		if timeout == -1 {
+			continue
+		}
+
+		curr := time.Now()
+		ms_remaining = int64(timeout) - curr.Sub(start).Milliseconds()
+
+	}
+
+	return w.Reserve(size)
+}
+
+func (w *Writer) Free() {}

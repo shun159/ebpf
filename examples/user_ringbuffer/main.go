@@ -61,12 +61,19 @@ func main() {
 	}
 	defer wd.Close()
 
-	sample, err := wd.Reserve(100)
+	sample, err := wd.Reserve(4)
 	if err != nil {
 		log.Fatalf("failed to reserve user_ringbuf: %s", err)
 	}
 	sample[0] = 1
-	wd.Commit(sample, false)
+	wd.Submit(sample)
+
+	sample2, err := wd.ReserveBlocking(8, 1000)
+	if err != nil {
+		log.Fatalf("failed to reserve user_ringbuf: %s", err)
+	}
+	sample2[0] = 2
+	wd.Submit(sample2)
 
 	// Close the reader when the process receives a signal, which will exit
 	// the read loop.
