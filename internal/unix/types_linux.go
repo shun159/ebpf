@@ -15,6 +15,7 @@ const (
 	ENOSPC     = linux.ENOSPC
 	EINVAL     = linux.EINVAL
 	EPOLLIN    = linux.EPOLLIN
+	EPOLLOUT   = linux.EPOLLOUT
 	EINTR      = linux.EINTR
 	EPERM      = linux.EPERM
 	ESRCH      = linux.ESRCH

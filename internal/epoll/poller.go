@@ -81,13 +81,8 @@ func (p *Poller) Close() error {
 	return nil
 }
 
-// Add an fd to the poller.
-//
-// id is returned by Wait in the unix.EpollEvent.Pad field any may be zero. It
-// must not exceed math.MaxInt32.
-//
-// Add is blocked by Wait.
-func (p *Poller) Add(fd int, id int) error {
+// Add an fd to the poller with events option.
+func (p *Poller) AddwithEvents(fd, id, events int) error {
 	if int64(id) > math.MaxInt32 {
 		return fmt.Errorf("unsupported id: %d", id)
 	}
@@ -104,7 +99,7 @@ func (p *Poller) Add(fd int, id int) error {
 	// id in there, which allows us to identify the event later (e.g.,
 	// in case of perf events, which CPU sent it).
 	event := unix.EpollEvent{
-		Events: unix.EPOLLIN,
+		Events: uint32(events),
 		Fd:     int32(fd),
 		Pad:    int32(id),
 	}
@@ -114,6 +109,16 @@ func (p *Poller) Add(fd int, id int) error {
 	}
 
 	return nil
+}
+
+// Add an fd to the poller.
+//
+// id is returned by Wait in the unix.EpollEvent.Pad field any may be zero. It
+// must not exceed math.MaxInt32.
+//
+// Add is blocked by Wait.
+func (p *Poller) Add(fd int, id int) error {
+	return p.AddwithEvents(fd, id, unix.EPOLLIN)
 }
 
 // Wait for events.

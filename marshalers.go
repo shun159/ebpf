@@ -33,6 +33,10 @@ func marshalPtr(data interface{}, length int) (sys.Pointer, error) {
 	return sys.NewSlicePointer(buf), nil
 }
 
+func MarshalBytes(data interface{}, length int) (buf []byte, err error) {
+	return marshalBytes(data, length)
+}
+
 // marshalBytes converts an arbitrary value into a byte buffer.
 //
 // Prefer using Map.marshalKey and Map.marshalValue if possible, since

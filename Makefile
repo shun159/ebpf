@@ -45,6 +45,7 @@ TARGETS := \
 	testdata/kfunc \
 	testdata/invalid-kfunc \
 	testdata/kfunc-kmod \
+	testdata/user_ringbuf \
 	btf/testdata/relocs \
 	btf/testdata/relocs_read \
 	btf/testdata/relocs_read_tgt \

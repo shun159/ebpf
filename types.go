@@ -95,6 +95,10 @@ const (
 	InodeStorage
 	// TaskStorage - Specialized local storage map for task_struct.
 	TaskStorage
+	// BloomFilter - Specialized local storage map for bloomfilter.
+	BloomFilter
+	// UserRingBuf - Similar to RingBuf, but use to send data to kernel from user-space.
+	UserRingBuf
 )
 
 // hasPerCPUValue returns true if the Map stores a value per CPU.

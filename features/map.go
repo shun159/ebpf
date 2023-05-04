@@ -213,6 +213,17 @@ var haveMapTypeMatrix = internal.FeatureMatrix[ebpf.MapType]{
 		Version: "5.11",
 		Fn:      func() error { return probeStorageMap(sys.BPF_MAP_TYPE_TASK_STORAGE) },
 	},
+	ebpf.UserRingBuf: {
+		Version: "6.1",
+		Fn: func() error {
+			return createMap(&sys.MapCreateAttr{
+				MapType:    sys.BPF_MAP_TYPE_USER_RINGBUF,
+				KeySize:    0,
+				ValueSize:  0,
+				MaxEntries: uint32(os.Getpagesize()),
+			})
+		},
+	},
 }
 
 func init() {
