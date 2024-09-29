@@ -134,6 +134,10 @@ type ProgramSpec struct {
 
 	// The byte order this program was compiled for, may be nil.
 	ByteOrder binary.ByteOrder
+
+	AttachBtfObjFd     int
+	AttachBtfId        btf.TypeID
+	ExpectedAttachType sys.AttachType
 }
 
 // Copy returns a copy of the spec.
@@ -267,8 +271,10 @@ func newProgramWithOptions(spec *ProgramSpec, opts ProgramOptions) (*Program, er
 		ExpectedAttachType: sys.AttachType(spec.AttachType),
 		License:            sys.NewStringPointer(spec.License),
 		KernVersion:        kv,
+		AttachBtfObjFd:     uint32(spec.AttachBtfObjFd),
 	}
 
+	attr.ExpectedAttachType = spec.ExpectedAttachType
 	if haveObjName() == nil {
 		attr.ProgName = sys.NewObjName(spec.Name)
 	}
@@ -319,6 +325,12 @@ func newProgramWithOptions(spec *ProgramSpec, opts ProgramOptions) (*Program, er
 		attr.LineInfoRecSize = btf.LineInfoSize
 		attr.LineInfoCnt = uint32(len(lib)) / btf.LineInfoSize
 		attr.LineInfo = sys.NewSlicePointer(lib)
+	}
+
+	if spec.Type == StructOps {
+		attr.ExpectedAttachType = spec.ExpectedAttachType
+		attr.AttachBtfObjFd = uint32(spec.AttachBtfObjFd)
+		attr.AttachBtfId = spec.AttachBtfId
 	}
 
 	if !b.Empty() {
@@ -384,6 +396,13 @@ func newProgramWithOptions(spec *ProgramSpec, opts ProgramOptions) (*Program, er
 			attr.AttachBtfObjFd = uint32(module.FD())
 			defer module.Close()
 		}
+
+		if spec.Type == StructOps {
+			attr.AttachBtfObjFd = uint32(spec.AttachBtfObjFd)
+			attr.AttachBtfId = spec.AttachBtfId
+			attr.ExpectedAttachType = spec.ExpectedAttachType
+		}
+
 	}
 
 	// The caller requested a specific verifier log level. Set up the log buffer

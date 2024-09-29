@@ -35,6 +35,26 @@ var (
 	errMapLookupKeyNotExist = fmt.Errorf("lookup: %w", sysErrKeyNotExist)
 )
 
+type StructOpsSpec struct {
+	ProgramSpecs []*ProgramSpec
+	KernFuncOff  []uint32
+	/* e.g. struct tcp_congestion_ops in bpf_prog's btf format */
+	Data []byte
+	/* e.g. struct bpf_struct_ops_tcp_congestion_ops in
+	 *      btf_vmlinux's format.
+	 * struct bpf_struct_ops_tcp_congestion_ops {
+	 *	[... some other kernel fields ...]
+	 *	struct tcp_congestion_ops data;
+	 * }
+	 * kern_vdata-size == sizeof(struct bpf_struct_ops_tcp_congestion_ops)
+	 * bpf_map__init_kern_struct_ops() will populate the "kern_vdata"
+	 * from "data".
+	 */
+	KernVData []byte
+	TypeId    btf.TypeID
+	Btf       *btf.Spec
+}
+
 // MapOptions control loading a map into the kernel.
 type MapOptions struct {
 	// The base path to pin maps in if requested via PinByName.
@@ -83,6 +103,21 @@ type MapSpec struct {
 
 	// The key and value type of this map. May be nil.
 	Key, Value btf.Type
+
+	// This attribute specifies the BTF type ID of the map value within
+	// the BTF object indicated by btf_id.
+	BtfValueTypeId btf.TypeID
+
+	// This attribute is specifically used for the BPF_MAP_TYPE_STRUCT_OPS map type to
+	// indicate which structure in the kernel we wish to replicate using eBPF.
+	BtfVmlinuxValueTypeId btf.TypeID
+
+	StructOps *StructOpsSpec
+
+	BtfFd uint32
+
+	SecIdx    int32
+	SecOffset uint64
 }
 
 func (ms *MapSpec) String() string {
@@ -233,6 +268,153 @@ func (ms *MapSpec) Compatible(m *Map) error {
 	}
 
 	return fmt.Errorf("%s: %w", strings.Join(diffs, ", "), ErrMapIncompatible)
+}
+
+func (ms *MapSpec) initKernStructOps(s *btf.Spec, kernBtf *btf.Spec) error {
+	if ms.Type != StructOpsMap || ms.StructOps == nil {
+		return fmt.Errorf("not a struct_ops map")
+	}
+
+	structOps := ms.StructOps
+	userType, err := kernBtf.TypeByID(structOps.TypeId)
+	if err != nil {
+		return fmt.Errorf("failed to resolve user type by ID: %d", structOps.TypeId)
+	}
+
+	userStructType, ok := userType.(*btf.Struct)
+	if !ok {
+		return fmt.Errorf("typeId: %d is not a sturct type")
+	}
+
+	kernTypes, err := findStructOpsKernelTypes(kernBtf, userStructType.Name)
+	if err != nil {
+		return fmt.Errorf("failed to resolve kern type by name: %s", userStructType.Name)
+	}
+
+	it := new(btf.HandleIterator)
+	module := new(btf.Handle)
+
+	for it.Next() {
+		info, err := it.Handle.Info()
+		if err != nil {
+			return fmt.Errorf("get info for BTF ID %d: %w", it.ID, err)
+		}
+
+		if !info.IsModule() {
+			continue
+		}
+
+		_, err = it.Handle.Spec(kernBtf)
+		if err != nil {
+			return fmt.Errorf("parse types for module %s: %w", info.Name, err)
+		}
+
+		module = it.Take()
+		break
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("iterate modules: %w", err)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed find target from kernel: %w", err)
+	}
+
+	vSize, _ := btf.Sizeof(kernTypes.ValueType)
+	ms.ValueSize = uint32(vSize)
+	ms.BtfVmlinuxValueTypeId = kernTypes.ValueTypeID
+	ms.BtfFd = uint32(module.FD())
+
+	structOps.KernVData = make([]byte, kernTypes.ValueType.Size)
+
+	data := structOps.Data
+	kernDataOff := kernTypes.DataMember.Offset / 8
+	kernData := structOps.KernVData[kernDataOff:]
+
+	for idx, member := range userStructType.Members {
+		memberName := member.Name
+		memberOffset := member.Offset / 8
+		memberData := data[memberOffset:]
+		memberSize, err := btf.Sizeof(member.Type)
+
+		if err != nil {
+			return fmt.Errorf("failed to resolve the size of member %s %w", memberName, err)
+		}
+
+		kernMember, err := findStructMemberByName(kernTypes.Type, member.Name)
+		if err != nil {
+			if isMemoryZero(memberData[:memberSize]) {
+				continue
+			}
+			return fmt.Errorf("member %s not found in kernel BTF and data is not zero", memberName)
+		}
+
+		kernMemberIdx := findMemberIndex(kernTypes.Type, kernMember)
+		if isBitfield(&member) || isBitfield(kernMember) {
+			return fmt.Errorf("bitfield %s is not supported", memberName)
+		}
+
+		kernMemberOffset := kernMember.Offset / 8
+		kernMemberData := kernData[kernMemberOffset:]
+
+		memberType, err := skipModsAndTypedefs(kernBtf, member.Type)
+		if err != nil {
+			return fmt.Errorf("user: failed to skip modifiers and typedefs for %s %w", memberName, err)
+		}
+
+		kernMemberType, err := skipModsAndTypedefs(kernBtf, kernMember.Type)
+		if err != nil {
+			return fmt.Errorf("kern: failed to skip modifiers and typedefs for %s %w", kernMember.Name, err)
+		}
+
+		// TODO: should be resolved `kind` of type to compare member type and kern type
+		if ptr, ok := memberType.(*btf.Pointer); ok {
+			ps := structOps.ProgramSpecs[idx]
+			if ps == nil {
+				continue
+			}
+
+			if ps.Type != StructOps {
+				return fmt.Errorf("member %s is not a valid struct_ops program", memberName)
+			}
+
+			kernMemberType, err = skipModsAndTypedefs(kernBtf, ptr)
+			if err != nil {
+				return fmt.Errorf("failed to skip modifiers and typedefs for %s %w", kernMember.Name, err)
+			}
+
+			kernMemberTypeId, _ := kernBtf.TypeID(kernMemberType)
+			if !isFunctionPointer(kernMemberTypeId, kernBtf) {
+				return fmt.Errorf("kernel member %s is not a function pointer", memberName)
+			}
+
+			kernMemberTypeId, err := kernBtf.TypeID(kernMemberType)
+			if err != nil {
+				return fmt.Errorf("failed to find kern typeId: %w", err)
+			}
+
+			ps.AttachBtfId = kernTypes.TypeID
+			ps.ExpectedAttachType = sys.AttachType(kernMemberIdx)
+			structOps.ProgramSpecs[idx] = ps
+			structOps.KernFuncOff[idx] = uint32(kernDataOff + kernMemberOffset)
+
+			fmt.Printf("struct_ops init_kern %s: function pointer %s is set to program %s\n", ms.Name, memberName, ps.Name)
+			continue
+		}
+
+		kernMemberSize, err := btf.Sizeof(kernMemberType)
+		if err != nil {
+			return fmt.Errorf("failed to resolve the size of kern member %s %w", memberName, err)
+		}
+
+		if err != nil || memberSize != kernMemberSize {
+			return fmt.Errorf("size mismatch for member %s: %d != %d (kernel)", memberName, memberSize, kernMemberSize)
+		}
+
+		copy(kernMemberData[:memberSize], memberData[:memberSize])
+	}
+
+	return nil
 }
 
 // Map represents a Map file descriptor.
@@ -421,6 +603,25 @@ func (spec *MapSpec) createMap(inner *sys.FD) (_ *Map, err error) {
 		NumaNode:   spec.NumaNode,
 	}
 
+	kernBTF, err := btf.LoadKernelSpec()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load kernel BTF: %w", err)
+	}
+
+	var b btf.Builder
+	handle, _ := btf.NewHandle(&b)
+
+	if spec.Type == StructOpsMap {
+		structOps := spec.StructOps
+		if err := spec.initKernStructOps(structOps.Btf, kernBTF); err != nil {
+			return nil, fmt.Errorf("failed to init kernel struct_ops: %s %w", spec.Name, err)
+		}
+
+		attr.ValueSize = spec.ValueSize
+		attr.BtfVmlinuxValueTypeId = spec.BtfVmlinuxValueTypeId
+		attr.BtfFd = uint32(handle.FD())
+	}
+
 	if inner != nil {
 		attr.InnerMapFd = inner.Uint()
 	}
@@ -443,9 +644,40 @@ func (spec *MapSpec) createMap(inner *sys.FD) (_ *Map, err error) {
 			attr.BtfKeyTypeId = keyTypeID
 			attr.BtfValueTypeId = valueTypeID
 		}
-	}
 
+	}
 	fd, err := sys.MapCreate(&attr)
+
+	if spec.Type == StructOpsMap {
+		structOps := spec.StructOps
+		userType, err := kernBTF.TypeByID(structOps.TypeId)
+		if err != nil {
+			return nil, fmt.Errorf("failed resolve user type: %d %w", structOps.TypeId, err)
+		}
+
+		userStructType, ok := userType.(*btf.Struct)
+		if !ok {
+			return nil, fmt.Errorf("typeId: %d is not a sturct type")
+		}
+		for idx, _ := range userStructType.Members {
+			ps := structOps.ProgramSpecs[idx]
+			if ps == nil {
+				continue
+			}
+			prog, err := NewProgram(ps)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load struct_ops program: %s %w", ps.Name, err)
+			}
+			kernDataOff := structOps.KernFuncOff[idx]
+			if int(kernDataOff)+int(unsafe.Sizeof(uintptr(0))) > len(structOps.KernVData) {
+				return nil, fmt.Errorf("kern_vdata buffer too small for offset %d", kernDataOff)
+			}
+
+			ptr := unsafe.Pointer(&structOps.KernVData[0])
+			fdPtr := (*uint64)(unsafe.Pointer(uintptr(ptr) + uintptr(kernDataOff)))
+			*fdPtr = uint64(prog.FD())
+		}
+	}
 
 	// Some map types don't support BTF k/v in earlier kernel versions.
 	// Remove BTF metadata and retry map creation.
@@ -462,6 +694,12 @@ func (spec *MapSpec) createMap(inner *sys.FD) (_ *Map, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("map create: %w", err)
 	}
+
+	if m.Type() == StructOpsMap {
+		zero := uint32(0)
+		m.Put(zero, spec.StructOps.KernVData)
+	}
+
 	return m, nil
 }
 

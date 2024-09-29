@@ -141,7 +141,8 @@ type RawLinkOptions struct {
 	// File descriptor to attach to. This differs for each attach type.
 	Target int
 	// Program to attach.
-	Program *ebpf.Program
+	Program   *ebpf.Program
+	ProgramFd int
 	// Attach must match the attach type of Program.
 	Attach ebpf.AttachType
 	// BTF is the BTF of the attachment target.
@@ -329,9 +330,12 @@ func AttachRawLink(opts RawLinkOptions) (*RawLink, error) {
 		return nil, fmt.Errorf("invalid target: %s", sys.ErrClosedFd)
 	}
 
-	progFd := opts.Program.FD()
-	if progFd < 0 {
-		return nil, fmt.Errorf("invalid program: %s", sys.ErrClosedFd)
+	progFd := opts.ProgramFd
+	if opts.Program != nil {
+		progFd = opts.Program.FD()
+		if progFd < 0 {
+			return nil, fmt.Errorf("invalid program: %s", sys.ErrClosedFd)
+		}
 	}
 
 	attr := sys.LinkCreateAttr{

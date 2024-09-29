@@ -1200,6 +1200,12 @@ func UnderlyingType(typ Type) Type {
 			result = v.qualify()
 		case *Typedef:
 			result = v.Type
+		case *Const:
+			result = v.Type
+		case *Volatile:
+			result = v.Type
+		case *Restrict:
+			result = v.Type
 		default:
 			return result
 		}

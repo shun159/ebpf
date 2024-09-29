@@ -100,6 +100,10 @@ func LoadCollectionSpecFromReader(rd io.ReaderAt) (*CollectionSpec, error) {
 			sections[idx] = newElfSection(sec, mapSection)
 		case sec.Name == ".maps":
 			sections[idx] = newElfSection(sec, btfMapSection)
+		case strings.HasPrefix(sec.Name, "struct_ops") ||
+			strings.HasPrefix(sec.Name, "struct_ops.s") ||
+			strings.HasPrefix(sec.Name, ".struct_ops.link"):
+			sections[idx] = newElfSection(sec, structOpsSection)
 		case sec.Name == ".bss" || strings.HasPrefix(sec.Name, ".data") || strings.HasPrefix(sec.Name, ".rodata"):
 			sections[idx] = newElfSection(sec, dataSection)
 		case sec.Type == elf.SHT_REL:
@@ -151,6 +155,10 @@ func LoadCollectionSpecFromReader(rd io.ReaderAt) (*CollectionSpec, error) {
 		return nil, fmt.Errorf("load maps: %w", err)
 	}
 
+	if err := ec.loadStructOpsMaps(); err != nil {
+		return nil, fmt.Errorf("load struct_ops setion: %w", err)
+	}
+
 	if err := ec.loadBTFMaps(); err != nil {
 		return nil, fmt.Errorf("load BTF maps: %w", err)
 	}
@@ -165,6 +173,10 @@ func LoadCollectionSpecFromReader(rd io.ReaderAt) (*CollectionSpec, error) {
 
 	if err := ec.loadKsymsSection(); err != nil {
 		return nil, fmt.Errorf("load virtual .ksyms section: %w", err)
+	}
+
+	if err := ec.collectStructOpsRelos(relSections, symbols); err != nil {
+		return nil, fmt.Errorf("collect struct_ops relo: %w", err)
 	}
 
 	// Finally, collect programs and link them.
@@ -212,6 +224,8 @@ const (
 	btfMapSection
 	programSection
 	dataSection
+	// section type for struct_ops
+	structOpsSection
 )
 
 type elfSection struct {
@@ -259,7 +273,7 @@ func (ec *elfCode) assignSymbols(symbols []elf.Symbol) {
 			if symType != elf.STT_NOTYPE && symType != elf.STT_OBJECT {
 				continue
 			}
-		case programSection:
+		case programSection, structOpsSection:
 			if symType != elf.STT_NOTYPE && symType != elf.STT_FUNC {
 				continue
 			}
@@ -318,7 +332,7 @@ func (ec *elfCode) loadProgramSections() (map[string]*ProgramSpec, error) {
 	// Generate a ProgramSpec for each function found in each program section.
 	var export []string
 	for _, sec := range ec.sections {
-		if sec.kind != programSection {
+		if sec.kind != programSection || sec.kind != structOpsSection {
 			continue
 		}
 
@@ -536,7 +550,7 @@ func (ec *elfCode) relocateInstruction(ins *asm.Instruction, rel elf.Symbol) err
 		ins.Constant = int64(uint64(offset) << 32)
 		ins.Src = asm.PseudoMapValue
 
-	case programSection:
+	case programSection, structOpsSection:
 		switch opCode := ins.OpCode; {
 		case opCode.JumpOp() == asm.Call:
 			if ins.Src != asm.PseudoCall {
@@ -1335,4 +1349,461 @@ func (ec *elfCode) loadSectionRelocations(sec *elf.Section, symbols []elf.Symbol
 	}
 
 	return rels, nil
+}
+
+func (ec *elfCode) collectStructOpsRelos(relSections map[elf.SectionIndex]*elf.Section, symbols []elf.Symbol) error {
+	for _, sec := range relSections {
+		if !strings.HasPrefix(sec.Name, ".rel") {
+			continue
+		}
+
+		relSec := sec
+		targetSec, ok := ec.sections[elf.SectionIndex(sec.Info)]
+		if !ok || !strings.HasPrefix(targetSec.Name, ".struct_ops") {
+			continue
+		}
+
+		rels, err := ec.loadSectionRelocations(relSec, symbols)
+		if err != nil {
+			return fmt.Errorf("failed to load relocations for section %s: %w", relSec.Name, err)
+		}
+
+		for relOff, symbol := range rels {
+			if err := ec.processStructOpsRelo(sec, relOff, symbol); err != nil {
+				return fmt.Errorf("failed to process struct_ops relocation: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (ec *elfCode) processStructOpsRelo(sec *elf.Section, relOff uint64, symbol elf.Symbol) error {
+	mapSpec, err := ec.findStructOpsMapByOffset(int32(sec.Info), relOff)
+	if err != nil {
+		return fmt.Errorf("failed to find struct_ops map: %w", err)
+	}
+
+	moff := relOff - mapSpec.SecOffset
+	structOps := mapSpec.StructOps
+	if structOps == nil {
+		return fmt.Errorf("StructOpsSpec not found in map %q", mapSpec.Name)
+	}
+
+	kernelBTF, err := btf.LoadKernelSpec()
+	if err != nil {
+		return fmt.Errorf("failed to load kernel BTF: %w", err)
+	}
+
+	typ, err := kernelBTF.TypeByID(structOps.TypeId)
+	if err != nil {
+		return fmt.Errorf("failed to get BTF type by ID %d: %w", structOps.TypeId, err)
+	}
+
+	structType, ok := typ.(*btf.Struct)
+	if !ok {
+		return fmt.Errorf("type ID %d is not a struct", structOps.TypeId)
+	}
+
+	_, memberIdx, err := ec.findMemberByOffset(structType, moff*8)
+	if err != nil {
+		return fmt.Errorf("failed to find member at offset %d: %w", moff, err)
+	}
+
+	progs, err := ec.collectStructOpsPrograms()
+	if err != nil {
+		return fmt.Errorf("failed to collect struct_ops progs: %w", err)
+	}
+
+	progSpec, ok := progs[symbol.Name]
+	if !ok {
+		return fmt.Errorf("ProgramSpec %q not found", symbol.Name)
+	}
+
+	if progSpec.Type != StructOps {
+		return fmt.Errorf("program %q is not of StructOps type", symbol.Name)
+	}
+
+	structOps.ProgramSpecs[memberIdx] = progSpec
+	binary.LittleEndian.PutUint64(structOps.Data[moff:], 0)
+
+	return nil
+}
+
+func (ec *elfCode) collectStructOpsPrograms() (map[string]*ProgramSpec, error) {
+	progs := make(map[string]*ProgramSpec)
+
+	for _, sec := range ec.sections {
+		if sec.kind != structOpsSection {
+			continue
+		}
+
+		if len(sec.symbols) == 0 {
+			continue
+		}
+
+		funcs, err := ec.loadFunctions(sec)
+		if err != nil {
+			return nil, fmt.Errorf("section %v: %w", sec.Name, err)
+		}
+
+		progType, attachType, progFlags, attachTo := getProgType(sec.Name)
+
+		for name, insns := range funcs {
+			spec := &ProgramSpec{
+				Name:          name,
+				Type:          progType,
+				Flags:         progFlags,
+				AttachType:    attachType,
+				AttachTo:      attachTo,
+				SectionName:   sec.Name,
+				License:       ec.license,
+				KernelVersion: ec.version,
+				Instructions:  insns,
+				ByteOrder:     ec.ByteOrder,
+			}
+
+			if progs[name] != nil {
+				return nil, fmt.Errorf("duplicate struct_ops program name %s", name)
+			}
+			progs[name] = spec
+		}
+	}
+
+	return progs, nil
+}
+
+func (ec *elfCode) findStructOpsMapByOffset(secIdx int32, offset uint64) (*MapSpec, error) {
+	for _, mapSpec := range ec.maps {
+		if mapSpec.Type != StructOpsMap {
+			continue
+		}
+
+		if mapSpec.SecIdx == secIdx &&
+			mapSpec.SecOffset <= offset &&
+			offset-mapSpec.SecOffset < uint64(mapSpec.ValueSize) {
+			return mapSpec, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no struct_ops map found for secIdx %d and relOffset %d", secIdx, offset)
+}
+
+func (ec *elfCode) findMemberByOffset(t btf.Type, bitOffset uint64) (*btf.Member, int, error) {
+	structType, ok := t.(*btf.Struct)
+	if !ok {
+		return nil, -1, fmt.Errorf("type is not a struct")
+	}
+
+	for idx, member := range structType.Members {
+		if member.Offset == btf.Bits(bitOffset) {
+			return &member, idx, nil
+		}
+	}
+
+	return nil, -1, fmt.Errorf("no member found at bit offset %d", bitOffset)
+}
+
+func (ec *elfCode) loadStructOpsMaps() error {
+	for secIdx, sec := range ec.sections {
+		if sec.kind != structOpsSection || sec.Type == elf.SHT_PROGBITS && (sec.Flags&elf.SHF_EXECINSTR) != 0 {
+			continue
+		}
+
+		if err := ec.processStructOpsSection(int32(secIdx), sec); err != nil {
+			return fmt.Errorf("failed to process struct_ops section %s: %w", sec.Name, err)
+		}
+	}
+	return nil
+}
+
+func (ec *elfCode) processStructOpsSection(secIdx int32, sec *elfSection) error {
+	// Get the BTF DataSec type for this section
+	dataSecType, err := ec.btf.AnyTypeByName(sec.Name)
+	if err != nil {
+		return fmt.Errorf("failed to find BTF type for section %s: %w", sec.Name, err)
+	}
+
+	dataSec, ok := dataSecType.(*btf.Datasec)
+	if !ok {
+		return fmt.Errorf("BTF type for section %s is not a DataSec", sec.Name)
+	}
+
+	// Iterate over variables in the DataSec
+	for _, v := range dataSec.Vars {
+		vt, ok := v.Type.(*btf.Var)
+		if !ok {
+			return fmt.Errorf("section %v: unexpected type %s", sec.Name, v.Type)
+		}
+
+		s, ok := btf.UnderlyingType(vt.Type).(*btf.Struct)
+		if !ok {
+			return fmt.Errorf("section %v: expected struct", sec.Name)
+		}
+
+		if err := ec.createStructOpsMap(&v, s, secIdx, sec); err != nil {
+			return fmt.Errorf("failed to create struct_ops map for variable %s: %w", v.Type.TypeName(), err)
+		}
+	}
+
+	return nil
+}
+
+func (ec *elfCode) createStructOpsMap(varSecInfo *btf.VarSecinfo, structType *btf.Struct, secIdx int32, sec *elfSection) error {
+	// Read the section data
+	data, err := sec.Data()
+	if err != nil {
+		return fmt.Errorf("failed to read section data: %w", err)
+	}
+
+	// Get the variable name
+	varVar, ok := varSecInfo.Type.(*btf.Var)
+	if !ok {
+		return fmt.Errorf("expected *btf.Var, got %T", varSecInfo.Type)
+	}
+	varName := varVar.Name
+
+	// Set map flags based on section name
+	flags := uint32(0)
+	if sec.Name == ".struct_ops.link" {
+		flags = sys.BPF_F_LINK
+	}
+
+	kernelBTF, err := btf.LoadKernelSpec()
+	if err != nil {
+		return fmt.Errorf("failed to load kernel BTF: %w", err)
+	}
+
+	kernStructType, err := kernelBTF.AnyTypeByName(structType.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get kernel BTF type ID for struct %s: %w", structType.Name, err)
+	}
+
+	var typ *btf.Struct
+	if v, ok := kernStructType.(*btf.Struct); ok {
+		typ = v
+	}
+
+	// Get the type ID from the kernel BTF
+	typeID, err := kernelBTF.TypeID(kernStructType)
+	if err != nil {
+		return fmt.Errorf("failed to get kernel BTF type ID for struct %s: %w", structType.Name, err)
+	}
+
+	structOps := &StructOpsSpec{
+		ProgramSpecs: make([]*ProgramSpec, len(typ.Members)),
+		KernFuncOff:  make([]uint32, len(typ.Members)),
+		Data:         make([]byte, typ.Size),
+		TypeId:       typeID,
+		Btf:          ec.btf.Copy(),
+	}
+
+	// Create a MapSpec for the struct_ops map
+	mapSpec := &MapSpec{
+		Name:           varName,
+		Type:           StructOpsMap,
+		KeySize:        4, // Key size is 4 bytes (size of int) for struct_ops maps
+		ValueSize:      typ.Size,
+		MaxEntries:     1,
+		Flags:          flags,
+		BtfValueTypeId: typeID,
+		StructOps:      structOps,
+		SecIdx:         secIdx,
+		SecOffset:      uint64(varSecInfo.Offset),
+	}
+
+	// Copy the initial data from the section
+	offset := uint64(varSecInfo.Offset)
+	size := uint64(structType.Size)
+
+	if offset+size > uint64(len(data)) {
+		return fmt.Errorf("variable %s data exceeds section size", varName)
+	}
+	copy(mapSpec.StructOps.Data, data[offset:offset+size])
+
+	// Add the map to the collection
+	ec.maps[varName] = mapSpec
+
+	return nil
+}
+
+func isFunctionPointer(typeID btf.TypeID, btfSpec *btf.Spec) bool {
+	t, err := btfSpec.TypeByID(typeID)
+	if err != nil {
+		return false
+	}
+
+	ptrType, ok := t.(*btf.Pointer)
+	if !ok {
+		return false
+	}
+
+	typeId, err := btfSpec.TypeID(ptrType.Target)
+	if err != nil {
+		return false
+	}
+
+	targetType, err := btfSpec.TypeByID(typeId)
+	if err != nil {
+		return false
+	}
+
+	_, isFuncProto := targetType.(*btf.FuncProto)
+	return isFuncProto
+}
+
+// find kernel Type by Name
+func findStructType(s *btf.Spec, name string) (*btf.Type, error) {
+	it := s.Iterate()
+
+	for it.Next() {
+		t := it.Type
+		if _, ok := t.(*btf.Struct); ok {
+			if t.TypeName() == name {
+				return &t, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("type %s not found in kernel BTF", name)
+}
+
+const strucOpsValuePrefix = "bpf_struct_ops_"
+
+func findStructByNameWithPrefix(s *btf.Spec, name string) (*btf.Type, error) {
+	return findStructType(s, strucOpsValuePrefix+name)
+}
+
+func findStructMember(s *btf.Spec, vtype *btf.Struct, typ *btf.Type) (*btf.Member, error) {
+	if vtype == nil || typ == nil {
+		return nil, fmt.Errorf("vtype and target type shouldnt be nil")
+	}
+
+	typeId, err := s.TypeID(*typ)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve typeId for %s: %w", (*typ).TypeName(), err)
+	}
+
+	for _, member := range vtype.Members {
+		memberTypeId, err := s.TypeID(member.Type)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve typeId for %s: %w", member.Name, err)
+		}
+
+		if memberTypeId == typeId {
+			return &member, nil
+		}
+	}
+	return nil, fmt.Errorf("data member of type %s not found in value type: %s", (*typ).TypeName(), vtype.Name)
+}
+
+func findStructMemberByName(structType *btf.Struct, name string) (*btf.Member, error) {
+	if structType == nil {
+		return nil, fmt.Errorf("structType shouldn't be nil")
+	}
+
+	for _, member := range structType.Members {
+		if member.Name == name {
+			return &member, nil
+		}
+	}
+	return nil, fmt.Errorf("member %s not found in struct %s", name, structType.Name)
+}
+
+func findMemberIndex(structType *btf.Struct, member *btf.Member) int {
+	for idx, m := range structType.Members {
+		if m.Offset == (*member).Offset {
+			return idx
+		}
+	}
+	return -1
+}
+
+func skipModsAndTypedefs(btfSpec *btf.Spec, typ btf.Type) (btf.Type, error) {
+	var t btf.Type
+
+	typeID, err := btfSpec.TypeID(typ)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get typeid of %s %w", typ.TypeName(), err)
+	}
+
+	t, err = btfSpec.TypeByID(typeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve type by ID %d: %w", typeID, err)
+	}
+
+	switch tt := t.(type) {
+	case *btf.Typedef:
+		return btf.UnderlyingType(tt.Type), nil
+	case *btf.Const:
+		return btf.UnderlyingType(tt.Type), nil
+	case *btf.Volatile:
+		return btf.UnderlyingType(tt.Type), nil
+	case *btf.Restrict:
+		return btf.UnderlyingType(tt.Type), nil
+	default:
+		return t, nil
+	}
+}
+
+func isMemoryZero(p []byte) bool {
+	for _, b := range p {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isBitfield(member *btf.Member) bool {
+	return member.BitfieldSize > 0
+}
+
+type StructOpsKernelTypes struct {
+	Type        *btf.Struct
+	TypeID      btf.TypeID
+	ValueType   *btf.Struct
+	ValueTypeID btf.TypeID
+	DataMember  *btf.Member
+}
+
+func findStructOpsKernelTypes(s *btf.Spec, name string) (*StructOpsKernelTypes, error) {
+	if s == nil {
+		return nil, fmt.Errorf("BTF spec shouldnt be nil")
+	}
+
+	kernType, err := findStructType(s, name)
+	if err != nil {
+		return nil, err
+	}
+	stKernType, _ := (*kernType).(*btf.Struct)
+
+	tmpKernValueType, err := findStructByNameWithPrefix(s, name)
+	if err != nil {
+		return nil, err
+	}
+	kernValueType, _ := (*tmpKernValueType).(*btf.Struct)
+
+	dataMember, err := findStructMember(s, kernValueType, kernType)
+	if err != nil {
+		return nil, err
+	}
+
+	kernTypeID, err := s.TypeID(*kernType)
+	if err != nil {
+		return nil, fmt.Errorf("lookup type of %s: %w", (*kernType).TypeName(), err)
+	}
+
+	kernValueTypeID, err := s.TypeID(kernValueType)
+	if err != nil {
+		return nil, fmt.Errorf("lookup type of %s: %w", (*kernType).TypeName(), err)
+	}
+
+	return &StructOpsKernelTypes{
+		Type:        stKernType,
+		TypeID:      kernTypeID,
+		ValueType:   kernValueType,
+		ValueTypeID: kernValueTypeID,
+		DataMember:  dataMember,
+	}, nil
 }
