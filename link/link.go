@@ -108,6 +108,8 @@ type RawLinkOptions struct {
 	BTF btf.TypeID
 	// Flags control the attach behaviour.
 	Flags uint32
+	// ProgramFD
+	ProgramFd int
 }
 
 // Info contains metadata on a link.

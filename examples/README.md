@@ -23,6 +23,8 @@ Please see our [guide on what makes a good example](https://ebpf-go.dev/contribu
   * [tcx](./tcx/) - Print packet counts for ingress and egress.
 * XDP - Attach a program to a network interface to process incoming packets.
   * [xdp](xdp/) - Print packet counts by IPv4 source address.
+* struct_ops - Work with `BPF_MAP_TYPE_STRUCT_OPS` maps.
+  * [sched_ext](sched_ext/) - Load a minimal task scheduler via struct_ops and attach it with a raw link.
 
 ## How to run
 

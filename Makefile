@@ -49,6 +49,8 @@ TARGETS := \
 	testdata/constants \
 	testdata/errors \
 	testdata/variables \
+	testdata/struct_ops \
+	testdata/struct_ops_bad \
 	btf/testdata/relocs \
 	btf/testdata/relocs_read \
 	btf/testdata/relocs_read_tgt \

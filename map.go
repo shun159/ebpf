@@ -556,6 +556,39 @@ func (spec *MapSpec) createMap(inner *sys.FD) (_ *Map, err error) {
 		}
 	}
 
+	if spec.Type == StructOpsMap {
+		meta := extractStructOpsMeta(spec.Contents)
+		if meta == nil {
+			return nil, fmt.Errorf("struct_ops map without metadata")
+		}
+
+		// we need drop meta entry here
+		if len(spec.Contents) > 0 {
+			spec.Contents = spec.Contents[1:]
+		}
+
+		var b btf.Builder
+		h, err := btf.NewHandle(&b)
+		if err != nil {
+			return nil, err
+		}
+		defer h.Close()
+
+		attr.ValueSize = spec.ValueSize
+		attr.BtfVmlinuxValueTypeId = meta.typeID
+		attr.BtfFd = uint32(h.FD())
+
+		if meta.modBtfObjID != 0 {
+			attr.MapFlags |= sys.BPF_F_VTYPE_BTF_OBJ_FD
+			modH, err := btf.NewHandleFromID(btf.ID(meta.modBtfObjID))
+			if err != nil {
+				return nil, fmt.Errorf("open module BTF (id=%d): %w", meta.modBtfObjID, err)
+			}
+			attr.ValueTypeBtfObjFd = int32(modH.FD())
+			defer modH.Close()
+		}
+	}
+
 	fd, err := sys.MapCreate(&attr)
 
 	// Some map types don't support BTF k/v in earlier kernel versions.

@@ -57,25 +57,14 @@ enum bpf_map_type {
 };
 
 enum xdp_action {
-	XDP_ABORTED = 0,
-	XDP_DROP = 1,
-	XDP_PASS = 2,
-	XDP_TX = 3,
+	XDP_ABORTED  = 0,
+	XDP_DROP     = 1,
+	XDP_PASS     = 2,
+	XDP_TX       = 3,
 	XDP_REDIRECT = 4,
 };
 
-enum tc_action {
-	TC_ACT_UNSPEC 		= -1,
-	TC_ACT_OK 			= 0,
-	TC_ACT_RECLASSIFY 	= 1,
-	TC_ACT_SHOT 		= 2,
-	TC_ACT_PIPE 		= 3,
-	TC_ACT_STOLEN 		= 4,
-	TC_ACT_QUEUED 		= 5,
-	TC_ACT_REPEAT 		= 6,
-	TC_ACT_REDIRECT 	= 7,
-	TC_ACT_JUMP 		= 0x10000000
-};
+enum tc_action { TC_ACT_UNSPEC = -1, TC_ACT_OK = 0, TC_ACT_RECLASSIFY = 1, TC_ACT_SHOT = 2, TC_ACT_PIPE = 3, TC_ACT_STOLEN = 4, TC_ACT_QUEUED = 5, TC_ACT_REPEAT = 6, TC_ACT_REDIRECT = 7, TC_ACT_JUMP = 0x10000000 };
 
 struct xdp_md {
 	__u32 data;
@@ -97,8 +86,8 @@ struct ethhdr {
 };
 
 struct iphdr {
-	__u8 ihl: 4;
-	__u8 version: 4;
+	__u8 ihl : 4;
+	__u8 version : 4;
 	__u8 tos;
 	__be16 tot_len;
 	__be16 id;
@@ -108,6 +97,68 @@ struct iphdr {
 	__sum16 check;
 	__be32 saddr;
 	__be32 daddr;
+};
+
+struct scx_cpu_acquire_args;
+
+struct scx_cpu_release_args;
+
+struct scx_init_task_args;
+
+struct scx_exit_task_args;
+
+struct scx_dump_ctx;
+
+struct scx_cgroup_init_args;
+
+struct scx_exit_info;
+
+struct task_struct;
+
+struct cpumask;
+
+struct cgroup;
+
+struct sched_ext_ops {
+	s32 (*select_cpu)(struct task_struct *, s32, u64);
+	void (*enqueue)(struct task_struct *, u64);
+	void (*dequeue)(struct task_struct *, u64);
+	void (*dispatch)(s32, struct task_struct *);
+	void (*tick)(struct task_struct *);
+	void (*runnable)(struct task_struct *, u64);
+	void (*running)(struct task_struct *);
+	void (*stopping)(struct task_struct *, int);
+	void (*quiescent)(struct task_struct *, u64);
+	int (*yield)(struct task_struct *, struct task_struct *);
+	int (*core_sched_before)(struct task_struct *, struct task_struct *);
+	void (*set_weight)(struct task_struct *, u32);
+	void (*set_cpumask)(struct task_struct *, const struct cpumask *);
+	void (*update_idle)(s32, int);
+	void (*cpu_acquire)(s32, struct scx_cpu_acquire_args *);
+	void (*cpu_release)(s32, struct scx_cpu_release_args *);
+	s32 (*init_task)(struct task_struct *, struct scx_init_task_args *);
+	void (*exit_task)(struct task_struct *, struct scx_exit_task_args *);
+	void (*enable)(struct task_struct *);
+	void (*disable)(struct task_struct *);
+	void (*dump)(struct scx_dump_ctx *);
+	void (*dump_cpu)(struct scx_dump_ctx *, s32, int);
+	void (*dump_task)(struct scx_dump_ctx *, struct task_struct *);
+	s32 (*cgroup_init)(struct cgroup *, struct scx_cgroup_init_args *);
+	void (*cgroup_exit)(struct cgroup *);
+	s32 (*cgroup_prep_move)(struct task_struct *, struct cgroup *, struct cgroup *);
+	void (*cgroup_move)(struct task_struct *, struct cgroup *, struct cgroup *);
+	void (*cgroup_cancel_move)(struct task_struct *, struct cgroup *, struct cgroup *);
+	void (*cgroup_set_weight)(struct cgroup *, u32);
+	void (*cpu_online)(s32);
+	void (*cpu_offline)(s32);
+	s32 (*init)(void);
+	void (*exit)(struct scx_exit_info *);
+	u32 dispatch_max_batch;
+	u64 flags;
+	u32 timeout_ms;
+	u32 exit_dump_len;
+	u64 hotplug_seq;
+	char name[128];
 };
 
 enum {

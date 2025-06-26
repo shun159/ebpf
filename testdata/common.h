@@ -14,7 +14,7 @@ enum libbpf_tristate {
 };
 
 #define __section(NAME) __attribute__((section(NAME), used))
-#define __uint(name, val) int(*name)[val]
+#define __uint(name, val) int (*name)[val]
 #define __type(name, val) typeof(val) *name
 #define __array(name, val) typeof(val) *name[]
 
@@ -43,6 +43,11 @@ enum libbpf_tristate {
 
 #define BPF_F_NO_PREALLOC (1U << 0)
 #define BPF_F_CURRENT_CPU (0xffffffffULL)
+
+#define DUMMY_OPS_DEFINE(__name, ...) \
+	__section(".struct_ops.link") struct bpf_dummy_ops __name = { \
+		__VA_ARGS__, \
+	};
 
 /* From tools/lib/bpf/libbpf.h */
 struct bpf_map_def {

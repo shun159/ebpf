@@ -116,8 +116,12 @@ func LoadCollectionSpecFromReader(rd io.ReaderAt) (*CollectionSpec, error) {
 		case sec.Type == elf.SHT_REL:
 			// Store relocations under the section index of the target
 			relSections[elf.SectionIndex(sec.Info)] = sec
-		case sec.Type == elf.SHT_PROGBITS && (sec.Flags&elf.SHF_EXECINSTR) != 0 && sec.Size > 0:
-			sections[idx] = newElfSection(sec, programSection)
+		case sec.Type == elf.SHT_PROGBITS:
+			if (sec.Flags&elf.SHF_EXECINSTR) != 0 && sec.Size > 0 {
+				sections[idx] = newElfSection(sec, programSection)
+			} else if sec.Name == structOpsSec || sec.Name == structOpsLinkSec {
+				sections[idx] = newElfSection(sec, structOpsSection)
+			}
 		}
 	}
 
@@ -164,6 +168,11 @@ func LoadCollectionSpecFromReader(rd io.ReaderAt) (*CollectionSpec, error) {
 		return nil, fmt.Errorf("load maps: %w", err)
 	}
 
+	// generate MapSpecs for struct_ops based on datasec
+	if err := loadStructOpsMapsFromSec(ec.btf, ec.sections, ec.maps); err != nil {
+		return nil, fmt.Errorf("struct_ops maps: %w", err)
+	}
+
 	if err := ec.loadBTFMaps(); err != nil {
 		return nil, fmt.Errorf("load BTF maps: %w", err)
 	}
@@ -184,6 +193,18 @@ func LoadCollectionSpecFromReader(rd io.ReaderAt) (*CollectionSpec, error) {
 	progs, err := ec.loadProgramSections()
 	if err != nil {
 		return nil, fmt.Errorf("load programs: %w", err)
+	}
+
+	// assiociate members in structs with ProgramSpecs using relo
+	if err := collectStructOpsRelocations(
+		ec.sections,
+		ec.maps,
+		progs,
+		relSections,
+		symbols,
+		ec.loadSectionRelocations,
+	); err != nil {
+		return nil, fmt.Errorf("struct_ops relos: %w", err)
 	}
 
 	return &CollectionSpec{
@@ -239,6 +260,7 @@ const (
 	btfMapSection
 	programSection
 	dataSection
+	structOpsSection
 )
 
 type elfSection struct {
@@ -286,7 +308,7 @@ func (ec *elfCode) assignSymbols(symbols []elf.Symbol) {
 			if symType != elf.STT_NOTYPE && symType != elf.STT_OBJECT {
 				continue
 			}
-		case programSection:
+		case programSection, structOpsSection:
 			if symType != elf.STT_NOTYPE && symType != elf.STT_FUNC {
 				continue
 			}
@@ -345,7 +367,11 @@ func (ec *elfCode) loadProgramSections() (map[string]*ProgramSpec, error) {
 	// Generate a ProgramSpec for each function found in each program section.
 	var export []string
 	for _, sec := range ec.sections {
-		if sec.kind != programSection {
+		if sec.kind != programSection && sec.kind != structOpsSection {
+			continue
+		}
+
+		if !(sec.Type == elf.SHT_PROGBITS && (sec.Flags&elf.SHF_EXECINSTR) != 0) {
 			continue
 		}
 
@@ -564,7 +590,7 @@ func (ec *elfCode) relocateInstruction(ins *asm.Instruction, rel elf.Symbol) err
 		ins.Constant = int64(uint64(offset) << 32)
 		ins.Src = asm.PseudoMapValue
 
-	case programSection:
+	case programSection, structOpsSection:
 		switch opCode := ins.OpCode; {
 		case opCode.JumpOp() == asm.Call:
 			if ins.Src != asm.PseudoCall {
