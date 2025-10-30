@@ -27,7 +27,7 @@ func AttachStructOps(m *ebpf.Map) (Link, error) {
 	}
 
 	if (int(m.Flags()) & sys.BPF_F_LINK) != sys.BPF_F_LINK {
-		return nil, fmt.Errorf("invalid map: BPF_F_LINK is requred: %w", ErrNotSupported)
+		return nil, fmt.Errorf("invalid map: BPF_F_LINK is required: %w", ErrNotSupported)
 	}
 
 	fd, err := sys.LinkCreate(&sys.LinkCreateAttr{
