@@ -9,30 +9,29 @@ import (
 
 type structOpsLink struct {
 	*RawLink
-	m *ebpf.Map
 }
 
 // AttachStructOps links a StructOps map
-func AttachStructOps(m *ebpf.Map) (*structOpsLink, error) {
+func AttachStructOps(m *ebpf.Map) (Link, error) {
 	if m == nil {
-		return nil, fmt.Errorf("attach StructOps: map cannot be nil: %w", errInvalidInput)
+		return nil, fmt.Errorf("map cannot be nil: %w", errInvalidInput)
 	}
 
 	if t := m.Type(); t != ebpf.StructOpsMap {
-		return nil, fmt.Errorf("attach StrcutOps: invalid map type %s, expected struct_ops: %w", t, errInvalidInput)
+		return nil, fmt.Errorf("invalid map type %s, expected struct_ops: %w", t, errInvalidInput)
 	}
 
-	mapFD, err := sys.NewFD(m.FD())
-	if err != nil {
-		return nil, fmt.Errorf("attach StructOps: %w", err)
+	mapFD := m.FD()
+	if mapFD <= 0 {
+		return nil, fmt.Errorf("invalid map: %s (was it created?)", sys.ErrClosedFd)
 	}
 
 	if (int(m.Flags()) & sys.BPF_F_LINK) != sys.BPF_F_LINK {
-		return &structOpsLink{&RawLink{mapFD, ""}, m}, nil
+		return nil, fmt.Errorf("invalid map: BPF_F_LINK is requred: %w", ErrNotSupported)
 	}
 
 	fd, err := sys.LinkCreate(&sys.LinkCreateAttr{
-		ProgFd:     uint32(m.FD()),
+		ProgFd:     uint32(mapFD),
 		AttachType: sys.AttachType(ebpf.AttachStructOps),
 		TargetFd:   0,
 	})
@@ -40,15 +39,5 @@ func AttachStructOps(m *ebpf.Map) (*structOpsLink, error) {
 		return nil, fmt.Errorf("attach StructOps: create link: %w", err)
 	}
 
-	rawLink := &RawLink{fd, ""}
-	return &structOpsLink{rawLink, nil}, nil
-}
-
-// DetachStructOps detaches a StructOps
-func (l *structOpsLink) DetachStructOps() error {
-	if l.m != nil {
-		// delete kern_vdata directly when it's without real link
-		return l.m.Delete(uint32(0))
-	}
-	return l.Close()
+	return &structOpsLink{&RawLink{fd: fd}}, nil
 }
